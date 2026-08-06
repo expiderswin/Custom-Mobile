@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 # Настройки
 TELEGRAM_TOKEN = "8912839996:AAGO4qR0gNIEpLgLMlhDeD5EsqINAvU7FvE"
@@ -18,7 +18,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # --- БАЗА ДАННЫХ (SQLite) ---
-conn = sqlite3.connect("bot_database.db")
+conn = sqlite3.connect("bot_database.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -49,7 +49,6 @@ def save_user_steam(telegram_id, steam_id):
 def get_keyboard(telegram_id):
   steam_id = get_user_steam(telegram_id)
   if not steam_id:
-    # Если аккаунт НЕ привязан — показываем кнопку добавления
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить Steam аккаунт")],
@@ -58,7 +57,6 @@ def get_keyboard(telegram_id):
         resize_keyboard=True,
     )
   else:
-    # Если аккаунт ПРИВЯЗАН — убираем кнопку добавления, добавляем функции статистики
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🕹 Мои игры и часы")],
@@ -71,7 +69,6 @@ def get_keyboard(telegram_id):
     )
 
 
-# Состояния
 class Form(StatesGroup):
   waiting_for_steam = State()
 
@@ -123,7 +120,6 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text == "➕ Добавить Steam аккаунт")
 async def ask_steam_input(message: types.Message, state: FSMContext):
-  # Проверка на всякий случай, если уже привязан
   if get_user_steam(message.from_user.id):
     await message.answer(
         "❌ Вы уже привязали аккаунт. Повторная привязка не требуется.",
@@ -134,8 +130,8 @@ async def ask_steam_input(message: types.Message, state: FSMContext):
   await state.set_state(Form.waiting_for_steam)
   await message.answer(
       "🔗 Отправь ссылку на свой профиль Steam (например:"
-      " `https://steamcommunity.com/id/s1mple/` или свою ссылку с"
-      " `/profiles/...`).",
+      " `https://steamcommunity.com/profiles/76561198...` или свою ссылку с"
+      " `/id/...`).",
       parse_mode="Markdown",
   )
 
@@ -155,7 +151,6 @@ async def show_tutorial(message: types.Message):
   )
 
 
-# Обработка ввода и привязка Steam (сохранение в БД)
 @dp.message(Form.waiting_for_steam)
 async def process_steam_profile(message: types.Message, state: FSMContext):
   await state.clear()
@@ -169,7 +164,6 @@ async def process_steam_profile(message: types.Message, state: FSMContext):
     )
     return
 
-  # Сохраняем в базу данных
   save_user_steam(message.from_user.id, steam_id)
 
   profile_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id}"
@@ -199,7 +193,6 @@ async def process_steam_profile(message: types.Message, state: FSMContext):
     )
 
 
-# --- КНОПКА: ИГРЫ И ЧАСЫ ---
 @dp.message(F.text == "🕹 Мои игры и часы")
 async def show_user_games(message: types.Message):
   steam_id = get_user_steam(message.from_user.id)
@@ -223,13 +216,12 @@ async def show_user_games(message: types.Message):
       )
       return
 
-    # Сортируем по часам (от большего к меньшему)
     games_sorted = sorted(
         games, key=lambda x: x.get("playtime_forever", 0), reverse=True
     )
 
     text = f"📚 **Всего игр на аккаунте:** {total_games}\n\n🕹 **Топ игр по часам:**\n"
-    for g in games_sorted[:15]:  گ  # Показываем топ-15 игр
+    for g in games_sorted[:15]:
       g_name = g.get("name")
       hours = round(g.get("playtime_forever", 0) / 60, 1)
       text += f"• {g_name} — **{hours} ч.**\n"
@@ -245,7 +237,6 @@ async def show_user_games(message: types.Message):
     )
 
 
-# --- КНОПКА: БАЛАНС И ОЦЕНКА ПОКУПОК ---
 @dp.message(F.text == "💰 Баланс и оценка покупок")
 async def show_account_value(message: types.Message):
   steam_id = get_user_steam(message.from_user.id)
@@ -259,20 +250,15 @@ async def show_account_value(message: types.Message):
   games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=true"
   try:
     games = requests.get(games_url).json().get("response", {}).get("games", [])
-
-    # Примерная оценка стоимости купленных игр (вычисляем по базовым параметрам или заглушке, так как Valve не дает точный прайс купленных игр по скидкам)
-    # В среднем принимаем условную базовую стоимость платной игры в районе 400-600 рублей, если она не бесплатная (playtime_forever > 0)
     paid_games = [g for g in games if g.get("playtime_forever", 0) > 0]
-    rough_estimate = len(paid_games) * 450  д
+    rough_estimate = len(paid_games) * 450
 
     msg = (
         "💰 **Оценка аккаунта и баланса:**\n\n"
         "🔒 *Прямой баланс кошелька Steam скрыт официальными правилами безопасности"
         " Valve API.*\n\n"
         f"📦 Всего игр с наиигранным временем: **{len(paid_games)} шт.**\n"
-        f"💵 Примерная оценочная стоимость купленных игр (в рублях): **~{rough_estimate:,} ₽**\n"
-        "*(Оценка рассчитывается приблизительно на основе библиотеки активных"
-        " игр)*"
+        f"💵 Примерная оценочная стоимость купленных игр (в рублях): **~{rough_estimate:,} ₽**"
     )
     await message.answer(
         msg, parse_mode="Markdown", reply_markup=get_keyboard(message.from_user.id)
@@ -285,7 +271,6 @@ async def show_account_value(message: types.Message):
     )
 
 
-# --- КНОПКА: РЕГИОН АККАУНТА ---
 @dp.message(F.text == "🌍 Регион аккаунта")
 async def show_account_region(message: types.Message):
   steam_id = get_user_steam(message.from_user.id)
@@ -303,7 +288,6 @@ async def show_account_region(message: types.Message):
     )
     country = player.get("loccountrycode", "Не указана")
 
-    # Определяем примерную валюту по коду страны
     currency_map = {
         "RU": "Российский рубль (RUB) 🇷🇺",
         "KZ": "Казахстанский тенге (KZT) 🇰🇿",
