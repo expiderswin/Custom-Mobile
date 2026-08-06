@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import re
 import requests
 from aiogram import Bot, Dispatcher, F, types
@@ -6,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 # Настройки
 TELEGRAM_TOKEN = "8912839996:AAGO4qR0gNIEpLgLMlhDeD5EsqINAvU7FvE"
@@ -16,24 +17,63 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# --- БАЗА ДАННЫХ (SQLite) ---
+conn = sqlite3.connect("bot_database.db")
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    steam_id TEXT
+)
+""")
+conn.commit()
 
-# Состояния для FSM
+
+def get_user_steam(telegram_id):
+  cursor.execute(
+      "SELECT steam_id FROM users WHERE telegram_id = ?", (telegram_id,)
+  )
+  row = cursor.fetchone()
+  return row[0] if row else None
+
+
+def save_user_steam(telegram_id, steam_id):
+  cursor.execute(
+      "INSERT OR REPLACE INTO users (telegram_id, steam_id) VALUES (?, ?)",
+      (telegram_id, steam_id),
+  )
+  conn.commit()
+
+
+# --- КЛАВИАТУРЫ ---
+def get_keyboard(telegram_id):
+  steam_id = get_user_steam(telegram_id)
+  if not steam_id:
+    # Если аккаунт НЕ привязан — показываем кнопку добавления
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить Steam аккаунт")],
+            [KeyboardButton(text="📖 Как узнать ссылку?")],
+        ],
+        resize_keyboard=True,
+    )
+  else:
+    # Если аккаунт ПРИВЯЗАН — убираем кнопку добавления, добавляем функции статистики
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🕹 Мои игры и часы")],
+            [
+                KeyboardButton(text="💰 Баланс и оценка покупок"),
+                KeyboardButton(text="🌍 Регион аккаунта"),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+
+# Состояния
 class Form(StatesGroup):
   waiting_for_steam = State()
-  waiting_for_share_code = State()
-
-
-# Главная клавиатура
-def get_main_keyboard():
-  keyboard = ReplyKeyboardMarkup(
-      keyboard=[
-          [KeyboardButton(text="➕ Добавить Steam аккаунт")],
-          [KeyboardButton(text="📊 Статистика матчей (Share Code)")],
-          [KeyboardButton(text="📖 Как узнать ссылку и код?")],
-      ],
-      resize_keyboard=True,
-  )
-  return keyboard
 
 
 # Конвертация ссылки Steam в SteamID64
@@ -65,50 +105,57 @@ def resolve_steam_id(user_input: str) -> str:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-  text = (
-      "Привет! 👋 Этот бот показывает статистику Steam и матчей CS2 через"
-      " официальные данные.\n\nИспользуй кнопки внизу:"
-  )
-  await message.answer(text, reply_markup=get_main_keyboard())
+  kb = get_keyboard(message.from_user.id)
+  steam_id = get_user_steam(message.from_user.id)
+
+  if steam_id:
+    text = (
+        "С возвращением! 👋 Ваш Steam аккаунт уже привязан.\nИспользуйте кнопки"
+        " ниже для просмотра статистики:"
+    )
+  else:
+    text = (
+        "Привет! 👋 Этот бот покажет всю статистику твоего Steam.\nНажми кнопку"
+        " ниже, чтобы привязать свой аккаунт:"
+    )
+  await message.answer(text, reply_markup=kb)
 
 
 @dp.message(F.text == "➕ Добавить Steam аккаунт")
 async def ask_steam_input(message: types.Message, state: FSMContext):
+  # Проверка на всякий случай, если уже привязан
+  if get_user_steam(message.from_user.id):
+    await message.answer(
+        "❌ Вы уже привязали аккаунт. Повторная привязка не требуется.",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
+    return
+
   await state.set_state(Form.waiting_for_steam)
   await message.answer(
       "🔗 Отправь ссылку на свой профиль Steam (например:"
-      " `https://steamcommunity.com/id/s1mple/`) или свой ID.",
+      " `https://steamcommunity.com/id/s1mple/` или свою ссылку с"
+      " `/profiles/...`).",
       parse_mode="Markdown",
   )
 
 
-@dp.message(F.text == "📊 Статистика матчей (Share Code)")
-async def ask_share_code(message: types.Message, state: FSMContext):
-  await state.set_state(Form.waiting_for_share_code)
-  await message.answer(
-      "🎯 Введите ваш **Код матча CS2 (Share Code)**:\n*(Его можно скопировать"
-      " в игре в истории соревновательных матчей)*",
-      parse_mode="Markdown",
-  )
-
-
-@dp.message(F.text == "📖 Как узнать ссылку и код?")
+@dp.message(F.text == "📖 Как узнать ссылку?")
 async def show_tutorial(message: types.Message):
   tutorial_text = (
       "📖 **Инструкция:**\n\n"
-      "1️⃣ **Как найти ссылку на Steam:**\n"
-      "• Откройте профиль Steam -> скопируйте ссылку из адресной строки.\n"
-      "• Нажмите «➕ Добавить Steam аккаунт» и отправьте её боту.\n\n"
-      "2️⃣ **Как найти код матча (Share Code):**\n"
-      "• Зайдите в CS2 -> «Матчи» -> «Последние матчи».\n"
-      "• Скопируйте код матча вида: `CSGO-XXXXX-XXXXX...`\n"
-      "• Нажмите «📊 Статистика матчей» и отправьте код для анализа K/D и"
-      " результатов."
+      "• Откройте профиль Steam в приложении или браузере.\n"
+      "• Скопируйте ссылку на профиль (вида `https://steamcommunity.com/profiles/...`)\n"
+      "• Нажмите **«➕ Добавить Steam аккаунт»** и отправьте ссылку боту."
   )
-  await message.answer(tutorial_text, parse_mode="Markdown")
+  await message.answer(
+      tutorial_text,
+      parse_mode="Markdown",
+      reply_markup=get_keyboard(message.from_user.id),
+  )
 
 
-# Обработка Steam
+# Обработка ввода и привязка Steam (сохранение в БД)
 @dp.message(Form.waiting_for_steam)
 async def process_steam_profile(message: types.Message, state: FSMContext):
   await state.clear()
@@ -117,96 +164,175 @@ async def process_steam_profile(message: types.Message, state: FSMContext):
 
   if not steam_id:
     await message.answer(
-        "❌ Не удалось найти профиль. Проверьте ссылку.",
-        reply_markup=get_main_keyboard(),
+        "❌ Не удалось найти профиль. Проверьте правильность ссылки.",
+        reply_markup=get_keyboard(message.from_user.id),
     )
     return
 
-  profile_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id}"
-  level_url = f"https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/?key={STEAM_API_KEY}&steamid={steam_id}"
-  games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=true"
+  # Сохраняем в базу данных
+  save_user_steam(message.from_user.id, steam_id)
 
+  profile_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id}"
   try:
     p_data = requests.get(profile_url).json().get("response", {}).get("players")
     if not p_data:
       await message.answer(
-          "❌ Профиль скрыт или не найден.", reply_markup=get_main_keyboard()
+          "❌ Профиль скрыт или не найден.",
+          reply_markup=get_keyboard(message.from_user.id),
       )
       return
 
     player = p_data[0]
     name = player.get("personaname")
-    profile_link = player.get("profileurl")
-    country = player.get("loccountrycode", "Не указана")
 
-    steam_level = (
-        requests.get(level_url)
-        .json()
-        .get("response", {})
-        .get("player_level", "Скрыт")
-    )
-
-    games_data = (
-        requests.get(games_url).json().get("response", {}).get("games", [])
-    )
-    total_games = len(games_data)
-    games_sorted = sorted(
-        games_data, key=lambda x: x.get("playtime_forever", 0), reverse=True
-    )
-
-    top_games_text = ""
-    for g in games_sorted[:5]:
-      g_name = g.get("name")
-      hours = round(g.get("playtime_forever", 0) / 60, 1)
-      top_games_text += f"• {g_name}: **{hours} ч.**\n"
-
-    msg = (
-        f"✅ **Steam аккаунт привязан!**\n\n"
-        f"👤 Имя: **{name}**\n"
-        f"⭐ Уровень Steam: **{steam_level}**\n"
-        f"🌍 Страна: {country}\n"
-        f"📚 Всего игр: **{total_games}**\n\n"
-        f"🕹 **Топ игр по часам:**\n{top_games_text}\n"
-        f"🔗 [Открыть профиль]({profile_link})"
-    )
     await message.answer(
-        msg, parse_mode="Markdown", reply_markup=get_main_keyboard()
+        f"✅ **Аккаунт {name} успешно привязан!**\nКнопка добавления скрыта,"
+        " теперь вам доступны все функции ниже.",
+        parse_mode="Markdown",
+        reply_markup=get_keyboard(message.from_user.id),
     )
-
   except Exception as e:
     logging.error(e)
     await message.answer(
-        "❌ Ошибка при запросе к Steam API.", reply_markup=get_main_keyboard()
+        "❌ Ошибка при привязке аккаунта.",
+        reply_markup=get_keyboard(message.from_user.id),
     )
 
 
-# Обработка кода матча CS2 (Share Code / аналитика)
-@dp.message(Form.waiting_for_share_code)
-async def process_share_code(message: types.Message, state: FSMContext):
-  await state.clear()
-  share_code = message.text.strip()
-
-  if not share_code.startswith("CSGO-"):
+# --- КНОПКА: ИГРЫ И ЧАСЫ ---
+@dp.message(F.text == "🕹 Мои игры и часы")
+async def show_user_games(message: types.Message):
+  steam_id = get_user_steam(message.from_user.id)
+  if not steam_id:
     await message.answer(
-        "❌ Неверный формат кода. Код матча должен начинаться с `CSGO-`",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(),
+        "Сначала привяжите аккаунт!",
+        reply_markup=get_keyboard(message.from_user.id),
     )
     return
 
-  # Здесь код обрабатывает запрос матча через публичные API или парсеры матчей Valve по Share Code
-  # Выводим базовый ответ-подтверждение получения кода
-  msg = (
-      f"📊 **Анализ матча по коду принят!**\n\n"
-      f"Код: `{share_code}`\n\n"
-      "ℹ️ *Чтобы полноценно собирать глубокую статистику (K/D, винрейт за все"
-      " матчи) автоматически без ручного ввода кодов, игроки обычно авторизуются"
-      " через Steam на специализированных трекерах (например, csstats.gg или"
-      " leetify), которые синхронизируют данные напрямую с Valve.*"
-  )
-  await message.answer(
-      msg, parse_mode="Markdown", reply_markup=get_main_keyboard()
-  )
+  games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=true"
+  try:
+    res = requests.get(games_url).json().get("response", {})
+    games = res.get("games", [])
+    total_games = res.get("game_count", len(games))
+
+    if not games:
+      await message.answer(
+          "❌ У вас скрыт список игр в настройках приватности Steam!",
+          reply_markup=get_keyboard(message.from_user.id),
+      )
+      return
+
+    # Сортируем по часам (от большего к меньшему)
+    games_sorted = sorted(
+        games, key=lambda x: x.get("playtime_forever", 0), reverse=True
+    )
+
+    text = f"📚 **Всего игр на аккаунте:** {total_games}\n\n🕹 **Топ игр по часам:**\n"
+    for g in games_sorted[:15]:  گ  # Показываем топ-15 игр
+      g_name = g.get("name")
+      hours = round(g.get("playtime_forever", 0) / 60, 1)
+      text += f"• {g_name} — **{hours} ч.**\n"
+
+    await message.answer(
+        text, parse_mode="Markdown", reply_markup=get_keyboard(message.from_user.id)
+    )
+  except Exception as e:
+    logging.error(e)
+    await message.answer(
+        "❌ Не удалось загрузить список игр.",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
+
+
+# --- КНОПКА: БАЛАНС И ОЦЕНКА ПОКУПОК ---
+@dp.message(F.text == "💰 Баланс и оценка покупок")
+async def show_account_value(message: types.Message):
+  steam_id = get_user_steam(message.from_user.id)
+  if not steam_id:
+    await message.answer(
+        "Сначала привяжите аккаунт!",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
+    return
+
+  games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=true"
+  try:
+    games = requests.get(games_url).json().get("response", {}).get("games", [])
+
+    # Примерная оценка стоимости купленных игр (вычисляем по базовым параметрам или заглушке, так как Valve не дает точный прайс купленных игр по скидкам)
+    # В среднем принимаем условную базовую стоимость платной игры в районе 400-600 рублей, если она не бесплатная (playtime_forever > 0)
+    paid_games = [g for g in games if g.get("playtime_forever", 0) > 0]
+    rough_estimate = len(paid_games) * 450  д
+
+    msg = (
+        "💰 **Оценка аккаунта и баланса:**\n\n"
+        "🔒 *Прямой баланс кошелька Steam скрыт официальными правилами безопасности"
+        " Valve API.*\n\n"
+        f"📦 Всего игр с наиигранным временем: **{len(paid_games)} шт.**\n"
+        f"💵 Примерная оценочная стоимость купленных игр (в рублях): **~{rough_estimate:,} ₽**\n"
+        "*(Оценка рассчитывается приблизительно на основе библиотеки активных"
+        " игр)*"
+    )
+    await message.answer(
+        msg, parse_mode="Markdown", reply_markup=get_keyboard(message.from_user.id)
+    )
+  except Exception as e:
+    logging.error(e)
+    await message.answer(
+        "❌ Ошибка при расчете стоимости.",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
+
+
+# --- КНОПКА: РЕГИОН АККАУНТА ---
+@dp.message(F.text == "🌍 Регион аккаунта")
+async def show_account_region(message: types.Message):
+  steam_id = get_user_steam(message.from_user.id)
+  if not steam_id:
+    await message.answer(
+        "Сначала привяжите аккаунт!",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
+    return
+
+  profile_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id}"
+  try:
+    player = (
+        requests.get(profile_url).json().get("response", {}).get("players", [])[0]
+    )
+    country = player.get("loccountrycode", "Не указана")
+
+    # Определяем примерную валюту по коду страны
+    currency_map = {
+        "RU": "Российский рубль (RUB) 🇷🇺",
+        "KZ": "Казахстанский тенге (KZT) 🇰🇿",
+        "UA": "Украинская гривна (UAH) 🇺🇦",
+        "US": "Доллар США (USD) 🇺🇸",
+        "TR": "Турецкая лира (TRY) 🇹🇷",
+        "AR": "Аргентинский песо (ARS) 🇦🇷",
+        "DE": "Евро (EUR) 🇪🇺",
+        "GB": "Британский фунт (GBP) 🇬🇧",
+    }
+
+    region_info = currency_map.get(
+        country, f"Регион по коду страны: {country}"
+    )
+
+    msg = (
+        f"🌍 **Информация о регионе:**\n\n"
+        f"• Страна профиля: **{country}**\n"
+        f"• Предполагаемая валюта/регион магазина: **{region_info}**"
+    )
+    await message.answer(
+        msg, parse_mode="Markdown", reply_markup=get_keyboard(message.from_user.id)
+    )
+  except Exception as e:
+    logging.error(e)
+    await message.answer(
+        "❌ Не удалось определить регион.",
+        reply_markup=get_keyboard(message.from_user.id),
+    )
 
 
 if __name__ == "__main__":
