@@ -51,7 +51,6 @@ def save_user_steam(telegram_id, steam_id):
 async def check_subscription(user_id: int) -> bool:
   try:
     member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-    # Статусы пользователя, означающие наличие подписки
     if member.status in ["creator", "administrator", "member"]:
       return True
     return False
@@ -80,9 +79,10 @@ def get_keyboard(telegram_id):
                 KeyboardButton(text="Топ задротских игр"),
             ],
             [
-                KeyboardButton(text="Баланс и оценка покупок"),
+                KeyboardButton(text="Инвентарь и скины (CS2)"),
                 KeyboardButton(text="Профиль и статус"),
             ],
+            [KeyboardButton(text="Баланс и оценка покупок")],
         ],
         resize_keyboard=True,
     )
@@ -132,7 +132,6 @@ def resolve_steam_id(user_input: str) -> str:
 async def sub_middleware_and_handler(message: types.Message, state: FSMContext):
   user_id = message.from_user.id
 
-  # Проверяем подписку
   is_subscribed = await check_subscription(user_id)
   if not is_subscribed:
     await message.answer(
@@ -142,7 +141,6 @@ async def sub_middleware_and_handler(message: types.Message, state: FSMContext):
     )
     return
 
-  # Если подписан, обрабатываем команды вручную
   text = message.text
 
   if text == "/start":
@@ -198,6 +196,9 @@ async def sub_middleware_and_handler(message: types.Message, state: FSMContext):
 
   elif text == "Топ задротских игр":
     await top_played_games(message)
+
+  elif text == "Инвентарь и скины (CS2)":
+    await show_steam_inventory(message)
 
   elif text == "Профиль и статус":
     await show_profile_status(message)
@@ -335,6 +336,56 @@ async def top_played_games(message: types.Message):
   except Exception as e:
     logging.error(e)
     await message.answer("Не удалось проанализировать хроники времени.")
+
+
+async def show_steam_inventory(message: types.Message):
+  steam_id = get_user_steam(message.from_user.id)
+  if not steam_id:
+    return
+
+  # Запрос инвентаря Counter-Strike 2 (AppID: 730)
+  url = f"https://steamcommunity.com/inventory/{steam_id}/730/2?l=russian&count=75"
+  try:
+    await message.answer(
+        "Сканирую хранилище материальных ценностей... Ожидай материализации"
+        " образов."
+    )
+    response = requests.get(url).json()
+
+    if not response.get("success"):
+      await message.answer(
+          "Инвентарь скрыт настройками приватности или временно недоступен."
+      )
+      return
+
+    descriptions = response.get("descriptions", [])
+    if not descriptions:
+      await message.answer("В этом хранилище не найдено предметов.")
+      return
+
+    count = 0
+    for item in descriptions:
+      if count >= 5:  # Ограничение в 5 предметов за раз, чтобы не перегружать чат
+        break
+
+      icon_hash = item.get("icon_url")
+      if not icon_hash:
+        continue
+
+      icon_url = f"https://steamcommunity-a.akamaihd.net/economy/image/{icon_hash}"
+      name = item.get("name", "Неизвестный предмет")
+      item_type = item.get("type", "Артефакт")
+
+      caption = f"Артефакт: {name}\nКлассификация: {item_type}"
+      await message.answer_photo(photo=icon_url, caption=caption)
+      count += 1
+
+    await message.answer(
+        "Материализация завершена.", reply_markup=get_keyboard(message.from_user.id)
+    )
+  except Exception as e:
+    logging.error(e)
+    await message.answer("Не удалось извлечь образы инвентаря из архивов.")
 
 
 async def show_profile_status(message: types.Message):
